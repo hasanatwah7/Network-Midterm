@@ -44,12 +44,17 @@ type Copy = {
   hintAnswer: string;
   hintNext: string;
   hintExit: string;
+  pause: string;
+  resume: string;
+  reset: string;
+  timerTip: string;
   backHome: string;
   finished: string;
   noteHigh: string;
   noteMid: string;
   noteLow: string;
   replay: string;
+  retryWrong: string;
   home: string;
   tier: string;
   footer: string;
@@ -114,12 +119,17 @@ export const copy: Record<Lang, Copy> = {
     hintAnswer: 'إجابة',
     hintNext: 'التالي',
     hintExit: 'خروج',
+    pause: 'إيقاف',
+    resume: 'استكمال',
+    reset: 'إعادة',
+    timerTip: 'اسحب التايمر',
     backHome: 'الرئيسية',
     finished: 'انتهيت',
     noteHigh: 'قوي جداً 🔥',
     noteMid: 'كويس، راجع اللي غلطت فيه',
     noteLow: 'هتعلم، جرّب رunda تانية',
     replay: 'إعادة',
+    retryWrong: 'إعادة الأخطاء',
     home: 'الرئيسية',
     tier: 'أولوية',
     footer: AR_FOOTER,
@@ -186,12 +196,17 @@ export const copy: Record<Lang, Copy> = {
     hintAnswer: 'to answer',
     hintNext: 'next',
     hintExit: 'exit',
+    pause: 'Pause',
+    resume: 'Resume',
+    reset: 'Reset',
+    timerTip: 'Drag timer',
     backHome: 'Home',
     finished: 'Run complete',
     noteHigh: 'Sharp 🔥',
     noteMid: 'Solid — review the misses',
     noteLow: 'Warm up and run it again',
     replay: 'Again',
+    retryWrong: 'Retry wrong answers',
     home: 'Home',
     tier: 'Tier',
     footer: AR_FOOTER,

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
+import { useEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from 'react';
 import {
   allQuestions,
   findQuestion,
@@ -44,12 +44,32 @@ function App() {
   const [lang, setLang] = useState<Lang>('ar');
   const [filters, setFilters] = useState<Filters>({ prof: 'both', source: 'all', topic: 'all', focusQ: null });
   const [patternTarget, setPatternTarget] = useState<string | null>(null);
+  const [hideHeader, setHideHeader] = useState(false);
   const t = copy[lang];
 
   useEffect(() => {
     document.documentElement.lang = lang;
     document.documentElement.dir = lang === 'ar' ? 'rtl' : 'ltr';
   }, [lang]);
+
+  // The 3twah header slides away when scrolling down and comes back on scroll up.
+  useEffect(() => {
+    let last = window.scrollY;
+    const onScroll = () => {
+      const y = window.scrollY;
+      if (Math.abs(y - last) < 2) return;
+      setHideHeader(y > 90 && y > last);
+      last = y;
+    };
+    window.addEventListener('scroll', onScroll, { passive: true });
+    return () => window.removeEventListener('scroll', onScroll);
+  }, []);
+
+  // Let the cursor glow sit above the fullscreen speedrun surface.
+  useEffect(() => {
+    document.body.classList.toggle('speedrun-active', section === 'speedrun');
+    return () => document.body.classList.remove('speedrun-active');
+  }, [section]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -88,7 +108,7 @@ function App() {
       <div className="glow-bg" aria-hidden="true" />
       <Cursor />
 
-      <header className="topbar">
+      <header className={`topbar ${hideHeader ? 'hidden' : ''}`}>
         <div className="wrap topbar-inner">
           <button className="brand" onClick={() => go('dashboard')} aria-label="3twah">
             <span className="brand-name">3twah<span className="brand-dot">.</span></span>
@@ -128,8 +148,13 @@ function App() {
             onQuestion={(id) => openSolve({ focusQ: id })}
           />
         )}
-        {section === 'speedrun' && <Speedrun lang={lang} onHome={() => go('dashboard')} />}
       </main>
+
+      {section === 'speedrun' && (
+        <div className="speedrun-overlay">
+          <Speedrun lang={lang} onHome={() => go('dashboard')} />
+        </div>
+      )}
 
       <footer className="footer mono">{t.footer}</footer>
     </div>
@@ -561,6 +586,8 @@ function Speedrun({ lang, onHome }: { lang: Lang; onHome: () => void }) {
   const t = copy[lang];
   const surface = useRef<HTMLDivElement>(null);
   const runRef = useRef<HTMLDivElement>(null);
+  const dragRef = useRef<{ sx: number; sy: number; ox: number; oy: number } | null>(null);
+  const pausedAtRef = useRef<number | null>(null);
   const [phase, setPhase] = useState<'setup' | 'run' | 'done'>('setup');
   const [duration, setDuration] = useState<Duration>(30);
   const [customSec, setCustomSec] = useState(90);
@@ -570,8 +597,13 @@ function Speedrun({ lang, onHome }: { lang: Lang; onHome: () => void }) {
 
   const [queue, setQueue] = useState<Q[]>([]);
   const [index, setIndex] = useState(0);
-  const [timeLeft, setTimeLeft] = useState(30);
+  const seconds = duration === 'custom' ? Math.min(600, Math.max(5, customSec || 5)) : duration;
+  const [limit, setLimit] = useState(seconds);
+  const [timeLeft, setTimeLeft] = useState(seconds);
   const [deadline, setDeadline] = useState<number | null>(null);
+  const [paused, setPaused] = useState(false);
+  const [timerPos, setTimerPos] = useState({ x: 0, y: 0 });
+  const [dragging, setDragging] = useState(false);
   const [chosen, setChosen] = useState(-1);
   const [revealed, setRevealed] = useState(false);
   const [results, setResults] = useState<Result[]>([]);
@@ -579,7 +611,10 @@ function Speedrun({ lang, onHome }: { lang: Lang; onHome: () => void }) {
   useSurfaceMotion(surface, `${phase}-${lang}-${duration}-${prof}-${speedSource}-${selectedTopics.join(',')}`);
   useRunMotion(runRef, `${index}-${revealed}-${lang}`);
 
-  const seconds = duration === 'custom' ? Math.min(600, Math.max(5, customSec || 5)) : duration;
+  useEffect(() => {
+    if (phase === 'setup') setLimit(seconds);
+  }, [phase, seconds]);
+
   const q = queue[index];
 
   const matches = (item: Q) =>
@@ -594,16 +629,85 @@ function Speedrun({ lang, onHome }: { lang: Lang; onHome: () => void }) {
   const toggleTopic = (id: TopicId) =>
     setSelectedTopics((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
 
+  // The per-question limit can be changed while the clock is running.
+  const adjustLimit = (delta: number) => {
+    const next = Math.min(600, Math.max(5, limit + delta));
+    if (next === limit) return;
+    setLimit(next);
+    setCustomSec(next);
+    setDuration('custom');
+    if (phase === 'run' && !revealed) {
+      const diff = next - limit;
+      setTimeLeft((prev) => Math.min(next, Math.max(0, prev + diff)));
+      setDeadline((d) => (d === null ? d : d + diff * 1000));
+      resetTicks();
+    }
+  };
+
+  const setExactLimit = (raw: number) => {
+    const next = Math.min(600, Math.max(5, Number.isFinite(raw) ? raw : 5));
+    adjustLimit(next - limit);
+  };
+
+  const togglePause = () => {
+    if (phase !== 'run' || revealed) return;
+    if (paused) {
+      const gap = Date.now() - (pausedAtRef.current ?? Date.now());
+      pausedAtRef.current = null;
+      setDeadline((d) => (d === null ? d : d + gap));
+      setPaused(false);
+      resetTicks();
+    } else {
+      pausedAtRef.current = Date.now();
+      setPaused(true);
+    }
+  };
+
+  const resetTimer = () => {
+    if (phase !== 'run' || revealed) return;
+    pausedAtRef.current = null;
+    setPaused(false);
+    resetTicks();
+    setTimeLeft(limit);
+    setDeadline(Date.now() + limit * 1000);
+  };
+
+  // Drag the whole timer chip anywhere on the screen.
+  const onDragStart = (e: ReactPointerEvent<HTMLDivElement>) => {
+    if ((e.target as HTMLElement).closest('button, input')) return;
+    try { e.currentTarget.setPointerCapture(e.pointerId); } catch { /* synthetic pointers have no capture target */ }
+    dragRef.current = { sx: e.clientX, sy: e.clientY, ox: timerPos.x, oy: timerPos.y };
+    setDragging(true);
+  };
+
+  const onDragMove = (e: ReactPointerEvent<HTMLDivElement>) => {
+    const d = dragRef.current;
+    if (!d) return;
+    setTimerPos({ x: d.ox + e.clientX - d.sx, y: d.oy + e.clientY - d.sy });
+  };
+
+  const onDragEnd = (e: ReactPointerEvent<HTMLDivElement>) => {
+    if (!dragRef.current) return;
+    dragRef.current = null;
+    setDragging(false);
+    try {
+      if (e.currentTarget.hasPointerCapture(e.pointerId)) e.currentTarget.releasePointerCapture(e.pointerId);
+    } catch { /* nothing captured */ }
+  };
+
   const start = () => {
     const pool = uniqueQuestions.filter(matches);
     if (!pool.length) return;
     unlockAudio();
     resetTicks();
+    pausedAtRef.current = null;
+    setLimit(seconds);
     setQueue(shuffle(pool));
     setIndex(0);
     setChosen(-1);
     setRevealed(false);
     setResults([]);
+    setPaused(false);
     setTimeLeft(seconds);
     setDeadline(Date.now() + seconds * 1000);
     setPhase('run');
@@ -614,6 +718,8 @@ function Speedrun({ lang, onHome }: { lang: Lang; onHome: () => void }) {
     if (choice === q.correctAnswerIndex) playCorrect();
     else playWrong();
     resetTicks();
+    pausedAtRef.current = null;
+    setPaused(false);
     setChosen(choice);
     setRevealed(true);
     setResults((r) => [...r, { id: q.id, chosen: choice, correct: choice === q.correctAnswerIndex, timedOut: choice < 0 }]);
@@ -622,6 +728,8 @@ function Speedrun({ lang, onHome }: { lang: Lang; onHome: () => void }) {
   const next = () => {
     if (!revealed) return;
     resetTicks();
+    pausedAtRef.current = null;
+    setPaused(false);
     if (index + 1 >= queue.length) {
       setPhase('done');
       setDeadline(null);
@@ -629,20 +737,43 @@ function Speedrun({ lang, onHome }: { lang: Lang; onHome: () => void }) {
       setIndex(index + 1);
       setChosen(-1);
       setRevealed(false);
-      setTimeLeft(seconds);
-      setDeadline(Date.now() + seconds * 1000);
+      setTimeLeft(limit);
+      setDeadline(Date.now() + limit * 1000);
     }
   };
 
   const stop = () => {
     resetTicks();
+    pausedAtRef.current = null;
+    setPaused(false);
     setPhase('setup');
     setDeadline(null);
     setQueue([]);
   };
 
+  // Start a fresh run containing only the questions missed in the last one.
+  const retryWrong = () => {
+    const pool = results
+      .filter((r) => !r.correct)
+      .map((r) => findQuestion(r.id))
+      .filter((item): item is Q => !!item);
+    if (!pool.length) return;
+    unlockAudio();
+    resetTicks();
+    pausedAtRef.current = null;
+    setQueue(shuffle(pool));
+    setIndex(0);
+    setChosen(-1);
+    setRevealed(false);
+    setResults([]);
+    setPaused(false);
+    setTimeLeft(limit);
+    setDeadline(Date.now() + limit * 1000);
+    setPhase('run');
+  };
+
   useEffect(() => {
-    if (phase !== 'run' || revealed || deadline === null) return;
+    if (phase !== 'run' || revealed || paused || deadline === null) return;
     const tick = () => {
       const left = Math.max(0, Math.ceil((deadline - Date.now()) / 1000));
       setTimeLeft(left);
@@ -652,13 +783,19 @@ function Speedrun({ lang, onHome }: { lang: Lang; onHome: () => void }) {
     tick();
     const id = window.setInterval(tick, 200);
     return () => window.clearInterval(id);
-  }, [phase, deadline, revealed, answer]);
+  }, [phase, deadline, revealed, paused, answer]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (phase !== 'run') return;
       if (e.key === 'Escape') { e.preventDefault(); stop(); return; }
+      if ((e.target as HTMLElement)?.tagName === 'INPUT') return;
       if (e.repeat) return;
+      const key = e.key.toLowerCase();
+      if (key === 'p') { e.preventDefault(); togglePause(); return; }
+      if (key === 'r') { e.preventDefault(); resetTimer(); return; }
+      if (e.key === '+' || e.key === '=') { e.preventDefault(); adjustLimit(5); return; }
+      if (e.key === '-' || e.key === '_') { e.preventDefault(); adjustLimit(-5); return; }
       if (!revealed && ['1', '2', '3', '4'].includes(e.key)) {
         e.preventDefault();
         answer(Number(e.key) - 1);
@@ -669,7 +806,7 @@ function Speedrun({ lang, onHome }: { lang: Lang; onHome: () => void }) {
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [phase, revealed, answer, next]);
+  }, [phase, revealed, answer, next, togglePause, resetTimer, adjustLimit]);
 
   if (phase === 'setup') {
     return (
@@ -730,6 +867,8 @@ function Speedrun({ lang, onHome }: { lang: Lang; onHome: () => void }) {
         <div className="keys-hint mono">
           <span><kbd>1</kbd>–<kbd>4</kbd> {t.hintAnswer}</span>
           <span><kbd>↵</kbd> {t.hintNext}</span>
+          <span><kbd>P</kbd> {t.pause}</span>
+          <span><kbd>R</kbd> {t.reset}</span>
           <span><kbd>Esc</kbd> {t.hintExit}</span>
           <span><kbd>L</kbd> EN/ع</span>
         </div>
@@ -739,6 +878,7 @@ function Speedrun({ lang, onHome }: { lang: Lang; onHome: () => void }) {
 
   if (phase === 'done') {
     const right = results.filter((r) => r.correct).length;
+    const wrong = results.length - right;
     const pct = results.length ? Math.round((right / results.length) * 100) : 0;
     const note = pct >= 80 ? t.noteHigh : pct >= 50 ? t.noteMid : t.noteLow;
     return (
@@ -749,6 +889,13 @@ function Speedrun({ lang, onHome }: { lang: Lang; onHome: () => void }) {
           <div className="pct mono">{pct}%</div>
           <p className="done-note">{note}</p>
           <div className="done-actions">
+            {wrong > 0 && (
+              <button className="go retry" onClick={retryWrong}>
+                <span className="prompt mono">&gt;</span> {t.retryWrong}
+                <span className="mono go-count">{wrong}</span>
+                <span className="go-arrow">→</span>
+              </button>
+            )}
             <button className="go" onClick={() => setPhase('setup')}><span className="prompt mono">&gt;</span> {t.replay}</button>
             <button className="ghost" onClick={onHome}>{t.home}</button>
           </div>
@@ -767,25 +914,50 @@ function Speedrun({ lang, onHome }: { lang: Lang; onHome: () => void }) {
   const isRight = chosen === q.correctAnswerIndex;
   const progress = ((index + (revealed ? 1 : 0)) / queue.length) * 100;
   const circumference = 2 * Math.PI * 30;
-  const offset = circumference * (1 - timeLeft / seconds);
+  const offset = circumference * (1 - timeLeft / limit);
 
   return (
     <div className="run" ref={runRef}>
       <div className="progress" data-run="meta"><div style={{ width: `${progress}%` }}><span className="progress-packet" /></div></div>
 
-      <div className={`timer-fly ${timeLeft <= 5 ? 'low' : ''}`} data-run="meta">
-        <div className="timer-ring">
-          <svg viewBox="0 0 72 72" aria-hidden="true">
-            <circle className="ring-bg" cx="36" cy="36" r="30" />
-            <circle className="ring-fg" cx="36" cy="36" r="30" strokeDasharray={circumference} strokeDashoffset={offset} />
-          </svg>
-          <span className="timer-num mono">{timeLeft}</span>
+      <div
+        className={`timer-fly ${timeLeft <= 5 ? 'low' : ''} ${paused ? 'paused' : ''} ${dragging ? 'dragging' : ''}`}
+        style={{ '--drag-x': `${timerPos.x}px`, '--drag-y': `${timerPos.y}px` } as CSSProperties}
+        onPointerDown={onDragStart}
+        onPointerMove={onDragMove}
+        onPointerUp={onDragEnd}
+        onPointerCancel={onDragEnd}
+      >
+        <div className="timer-top">
+          <div className="timer-ring">
+            <svg viewBox="0 0 72 72" aria-hidden="true">
+              <circle className="ring-bg" cx="36" cy="36" r="30" />
+              <circle className="ring-fg" cx="36" cy="36" r="30" strokeDasharray={circumference} strokeDashoffset={offset} />
+            </svg>
+            <span className="timer-num mono">{timeLeft}</span>
+          </div>
+          <div className="timer-copy">
+            <span className="mono">{paused ? t.pause : 'SEC'}</span>
+            <small className="mono">{String(index + 1).padStart(2, '0')} / {String(queue.length).padStart(2, '0')}</small>
+          </div>
+          <button className="esc" onClick={stop} title="Esc">✕</button>
         </div>
-        <div className="timer-copy">
-          <span className="mono">SEC</span>
-          <small className="mono">{String(index + 1).padStart(2, '0')} / {String(queue.length).padStart(2, '0')}</small>
+        <div className="timer-tools">
+          <button className="t-btn" onClick={() => adjustLimit(-5)} title="-5s">−5</button>
+          <input
+            className="t-sec mono"
+            type="number"
+            min={5}
+            max={600}
+            value={limit}
+            onChange={(e) => setExactLimit(Number(e.target.value))}
+            aria-label={t.timeLabel}
+          />
+          <button className="t-btn" onClick={() => adjustLimit(5)} title="+5s">+5</button>
+          <button className="t-btn wide" onClick={togglePause}>{paused ? t.resume : t.pause}</button>
+          <button className="t-btn" onClick={resetTimer} title={t.reset}>↺</button>
         </div>
-        <button className="esc" onClick={stop} title="Esc">✕</button>
+        <div className="timer-tip mono">{t.timerTip}</div>
       </div>
 
       <div className="run-body">
